@@ -1,2 +1,2 @@
-# VTTFG - Vertex Tax Test File Generator (With Logging)
-Generated.
+# VTTFG - Vertex Tax Test File Generator
+
