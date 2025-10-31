@@ -1,0 +1,8 @@
+streamlit
+pandas
+requests
+python-dotenv
+openpyxl
+snowflake-connector-python
+python-Levenshtein
+pytest

@@ -1,0 +1,5 @@
+PROMPTS = {
+    "classfication" :{
+        "Y"
+    }
+}

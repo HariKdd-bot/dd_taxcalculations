@@ -1,0 +1,15 @@
+__pycache__/
+.env
+*.pyc
+*.pyo
+.DS_Store
+/tmp/
+.vscode/
+.ddvenv/
+.venv/
+.ddenv/
+output/
+logs/
+data/
+output/
+test1.py
