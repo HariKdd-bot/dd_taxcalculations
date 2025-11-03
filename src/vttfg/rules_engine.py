@@ -1,8 +1,8 @@
 from typing import List, Dict
-from .models import ExtractionResult, TestRow
-from .config import CONFIG
+from vttfg.models import ExtractionResult, TestRow
+from vttfg.config import CONFIG
 from datetime import datetime
-from .connectors import geonames
+from vttfg.connectors import geonames
 import logging
 logger = logging.getLogger('vttfg.rules')
 def apply_rules(extr: ExtractionResult, division_map: Dict[str,str]=None) -> List[TestRow]:

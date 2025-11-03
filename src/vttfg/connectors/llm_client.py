@@ -226,19 +226,19 @@ def get_llm_client():
             logger.info("Mock LLM classify used", extra={"run_id": "-", "step": "llm_mock"})
             return ("UC6", 0.6)
 
-        def extract(self, t: str, c: str, p: Optional[str] = None) -> Dict[str, Any]:
-            logger.info("Mock LLM extract used", extra={"run_id": "-", "step": "llm_mock"})
-            return {
-                "item_codes": [CONFIG.default_item],
-                "product_classes": [],
-                "division_codes": [],
-                "department_codes": [],
-                "postal_codes": [],
-                "states": [],
-                "date_specs": [{"type": "effective", "date": None}],
-                "flex_fields": {},
-                "confidence": 0.0,
-                "raw_extracted_text": t[:1000],
-            }
+        # def extract(self, t: str, c: str, p: Optional[str] = None) -> Dict[str, Any]:
+        #     logger.info("Mock LLM extract used", extra={"run_id": "-", "step": "llm_mock"})
+        #     return {
+        #         "item_codes": [CONFIG.default_item],
+        #         "product_classes": [],
+        #         "division_codes": [],
+        #         "department_codes": [],
+        #         "postal_codes": [],
+        #         "states": [],
+        #         "date_specs": [{"type": "effective", "date": None}],
+        #         "flex_fields": {},
+        #         "confidence": 0.0,
+        #         "raw_extracted_text": t[:1000],
+        #     }
 
     return Mock()

@@ -1,14 +1,14 @@
 import logging
-from .connectors.llm_client import get_llm_client
-from .prompts import PROMPTS
-from .config import CONFIG
-from .models import ExtractionResult
+from vttfg.connectors.llm_client import get_llm_client
+from vttfg.prompts import PROMPTS
+from vttfg.config import CONFIG
+from vttfg.models import ExtractionResult
 from datetime import datetime
 from vttfg.prompts_loader import load_prompts
 
 logger = logging.getLogger('vttfg.extraction')
-_llm = get_llm_client()
 def extract_from_text(text: str, classification: str, jira_created_at: datetime = None) -> ExtractionResult:
+    _llm = get_llm_client()
     prompts=load_prompts()
     prompt = prompts.get("uc3", {}).get("prompt") if prompts else None
 

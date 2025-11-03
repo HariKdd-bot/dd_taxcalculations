@@ -1,53 +1,41 @@
 import pandas as pd, os, logging
-from typing import List, Dict
-from .models import TestRow
-logger = logging.getLogger('vttfg.generator')
-def read_template_metadata(path: str) -> Dict:
-    logger.info("read_template_metadata called for %s", path, extra={"run_id":"-","step":"template_read"})
-    if not os.path.exists(path):
-        return {'columns':[], 'skeleton':{}, 'product_list':set(), 'product_to_division':{}}
-    try:
-        df = pd.read_csv(path, nrows=1000, dtype=str)
-    except Exception:
-        df = pd.read_excel(path)
-    columns = list(df.columns)
-    product_list = set([str(x).upper() for x in df.iloc[:,0].dropna().unique()]) if df.shape[0]>0 else set()
-    product_to_division = {}
-    for _, row in df.iterrows():
-        try:
-            prod = str(row[df.columns[0]]).upper()
-            for c in df.columns:
-                if 'division' in c.lower():
-                    product_to_division[prod] = str(row[c])
-                    break
-        except Exception:
-            continue
-    skeleton = {c:'' for c in columns}
-    return {'columns':columns, 'skeleton':skeleton, 'product_list':product_list, 'product_to_division':product_to_division}
-def map_testrows_to_template(testrows: List[TestRow], template_meta: Dict) -> pd.DataFrame:
-    cols = template_meta.get('columns', [])
-    skeleton = template_meta.get('skeleton', {})
-    rows = []
-    for tr in testrows:
-        r = dict(skeleton)
-        for c in cols:
-            lc = c.lower()
-            if 'item' in lc or 'product' in lc or 'sku' in lc:
-                r[c] = tr.item_code
-            if 'division' in lc:
-                r[c] = tr.division_code or ''
-            if 'postal' in lc or 'zip' in lc:
-                r[c] = tr.dest_postal_code or ''
-            if 'state' in lc:
-                r[c] = tr.dest_state or ''
-            if 'expected' in lc or 'tax' in lc:
-                r[c] = tr.expected_tax_rate if tr.expected_tax_rate is not None else ''
-        rows.append(r)
-    df = pd.DataFrame(rows, columns=cols)
-    logger.info("Mapped %d testrows to template columns", len(rows), extra={"run_id":"-","step":"map_template"})
-    return df
-def generate_bci_from_template(template_path: str, testrows: List[TestRow]) -> bytes:
-    logger.info("generate_bci_from_template: mapping %d testrows to template %s", len(testrows), template_path, extra={"run_id":"-","step":"generate_start"})
-    meta = read_template_metadata(template_path)
-    df = map_testrows_to_template(testrows, meta)
-    return df.to_csv(index=False).encode('utf-8')
+from vttfg.config import CONFIG
+logger = logging.getLogger("vttfg.generator")
+
+def rows_to_csv_bytes(test_rows):
+    cols = [
+        "Document Number","Transaction Type","Message Type","Company Code","Division Code","Department Code",
+        "Line Item Number","Extended Price","flexibleCodeField1","flexibleCodeField2","flexibleCodeField3","flexibleCodeField4","flexibleCodeField5",
+        "Document Date","Destination Country","Destination Main Division","Destination Postal Code",
+        "Phys Origin Country","Phys Origin Main Division","Phys Origin Postal Code",
+        "Product Class Code","Product Code","Expected Value"
+    ]
+    records = []
+    for r in test_rows:
+        records.append({
+            "Document Number": r.document_number,
+            "Transaction Type": r.transaction_type,
+            "Message Type": r.message_type,
+            "Company Code": r.company_code,
+            "Division Code": r.division_code,
+            "Department Code": r.department_code,
+            "Line Item Number": r.line_item_number,
+            "Extended Price": r.extended_price,
+            "flexibleCodeField1": r.flex1,
+            "flexibleCodeField2": r.flex2,
+            "flexibleCodeField3": r.flex3,
+            "flexibleCodeField4": r.flex4,
+            "flexibleCodeField5": r.flex5,
+            "Document Date": r.document_date,
+            "Destination Country": r.dest_country,
+            "Destination Main Division": r.dest_main_division,
+            "Destination Postal Code": r.dest_postal_code,
+            "Phys Origin Country": r.phys_country,
+            "Phys Origin Main Division": r.phys_main_division,
+            "Phys Origin Postal Code": r.phys_postal_code,
+            "Product Class Code": r.product_class_code,
+            "Product Code": r.product_code,
+            "Expected Value": r.expected_value
+        })
+    df = pd.DataFrame(records, columns=cols)
+    return df.to_csv(index=False).encode("utf-8")

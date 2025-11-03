@@ -1,142 +1,98 @@
-# src/vttfg/orchestrator.py
-"""
-Main orchestrator with enhanced logging and run_id correlation.
-"""
-import logging, os, json, time
-from .connectors.jira_connector import JiraConnector
-from .connectors import filestore, snowflake_connector
-from .connectors.llm_client import get_llm_client
-from .extraction import extract_from_text
-from .generator import read_template_metadata, generate_bci_from_template
-from .rules_engine import apply_rules, populate_expected_rates
-from .config import CONFIG
-from .models import JiraContext
-from datetime import datetime
+import os, logging, json, datetime
+from vttfg.config import CONFIG
+from vttfg.logging_config import setup_logging
+from vttfg.prompts_loader import load_classify_prompt, load_prompt_for
+from vttfg.llm import get_llm_client
+from vttfg.connectors import jira as jira_conn, google_docs as gdocs, google_sheets as gsheets, snowflake as snowconn
+from vttfg.validators import validate_uc3
+from vttfg.rules import build_testrows
+from vttfg.generator import rows_to_csv_bytes
 
-# Setup logging config (calls setup in logging_config)
-from .logging_config import setup_logging
-LOG_PATH, LOG_SENSITIVE = setup_logging()
-logger = logging.getLogger('vttfg.orchestrator')
-from .prompts_loader import load_prompts
+LOG_PATH, _ = setup_logging(CONFIG.output_dir)
+logger = logging.getLogger("vttfg.orchestrator")
 
 class Orchestrator:
-    def __init__(self, jira_connector: JiraConnector = None, llm_client=None, sf_connector=None):
-        self.jira = jira_connector or JiraConnector()
-        self.llm = llm_client or get_llm_client()
-        self.sf = sf_connector or snowflake_connector.SnowflakeConnector()
-
-    def _log(self, level, msg, run_id='-', step='-', **extra):
-        logger.log(level, msg, extra={"run_id": run_id, "step": step, **(extra or {})})
-
-    def run_for_jira(self, jira_id: str, overrides: dict = None) -> dict:
-        run_id = f"run_{int(datetime.utcnow().timestamp())}_{jira_id}"
-        start_t = time.time()
-        self._log(logging.INFO, f"Starting run for {jira_id}", run_id=run_id, step="start")
-
-        # Step 1 - fetch JIRA context
+    def __init__(self):
+        self.llm = get_llm_client()
+        self.jira = jira_conn
+        self.gdocs = gdocs
+        self.gsheets = gsheets
         try:
+            self.snow = snowconn.SnowflakeConnector()
+        except Exception as e:
+            logger.warning("Snowflake connector not available: %s", e)
+            self.snow = None
+
+    def run_for_jira(self, jira_id, overrides=None):
+        overrides = overrides or {}
+        run_id = f"run_{int(datetime.datetime.utcnow().timestamp())}"
+        debug = {"notes": []}
+        # 1) Jira context (fetch once)
+        jc = overrides.get("jira_context")
+        if not jc:
             jc = self.jira.fetch_issue(jira_id)
-            self._log(logging.DEBUG, "Fetched JIRA issue", run_id=run_id, step="fetch_jira", jira_id=jira_id)
-        except Exception as e:
-            self._log(logging.ERROR, f"Failed to fetch JIRA {jira_id}: {e}", run_id=run_id, step="fetch_jira")
-            raise
-
-        # Build text blob: title + description + comments + linked docs (avoid huge content in logs)
-        parts = [jc.title or '', jc.description or ''] + (jc.comments or [])
-        text_blob = '\n\n'.join([p if isinstance(p, str) else str(p) for p in parts])
-        self._log(logging.INFO, "Built text blob", run_id=run_id, step="build_blob", blob_len=len(text_blob) if isinstance(text_blob, str) else -1)
-
-        # Step 3 - classify
-        try:
-            prompts = load_prompts()
-            prompts_classify = prompts["classification"]["prompt"]
-            classification, conf = self.llm.classify(text_blob, prompt_override= prompts_classify)
-            self._log(logging.INFO, f"LLM suggested classification={classification} conf={conf}", run_id=run_id, step="classify", classification=classification, confidence=conf)
-        except Exception as e:
-            self._log(logging.ERROR, f"LLM classification failed: {e}", run_id=run_id, step="classify")
-            classification, conf = ("UC6", 0.0)
-
-        # allow overrides from caller
-        if overrides and overrides.get('classification'):
-            self._log(logging.INFO, f"Overriding classification to {overrides.get('classification')}", run_id=run_id, step="override")
-            classification = overrides.get('classification')
-
-        # Step 4 - extract
-        try:
-            extraction = extract_from_text(text_blob, classification, jira_created_at=jc.created_at)
-            # For safety, redact raw LLM output length in log; if LOG_SENSITIVE True we log more
-            raw_len = len(extraction.raw_llm_response or "") if extraction.raw_llm_response else 0
-            self._log(logging.INFO, "Extraction complete", run_id=run_id, step="extract", item_count=len(extraction.item_codes or []), divisions=len(extraction.division_codes or []), states=len(extraction.states or []), raw_len=raw_len)
-            if LOG_SENSITIVE:
-                self._log(logging.DEBUG, f"Raw LLM extraction: {extraction.raw_llm_response}", run_id=run_id, step="extract_raw")
-        except Exception as e:
-            self._log(logging.ERROR, f"Extraction failed: {e}", run_id=run_id, step="extract")
-            raise
-
-        # Step 5 - defaults & manual override (UI normally)
-        template_path = overrides.get('template_path') if overrides and overrides.get('template_path') else CONFIG.bci_template_path
-        template_meta = {}
-        try:
-            template_meta = read_template_metadata(template_path)
-            self._log(logging.INFO, "Loaded template metadata", run_id=run_id, step="template_read", template_path=template_path, columns=len(template_meta.get('columns', [])))
-        except Exception as e:
-            self._log(logging.WARNING, f"Failed to read template metadata: {e}", run_id=run_id, step="template_read")
-
-        division_map = template_meta.get('product_to_division', {})
-
-        # Step 6 - rules & expand
-        try:
-            testrows = apply_rules(extraction, division_map=division_map)
-            self._log(logging.INFO, "Rules engine expanded test rows", run_id=run_id, step="rules_expand", count=len(testrows))
-        except Exception as e:
-            self._log(logging.ERROR, f"Rules engine failed: {e}", run_id=run_id, step="rules_expand")
-            raise
-
-        # enforce caps
-        if len(testrows) > CONFIG.max_combinations:
-            self._log(logging.WARNING, f"Test rows {len(testrows)} > max_combinations {CONFIG.max_combinations}. Truncating.", run_id=run_id, step="cap")
-            testrows = testrows[:CONFIG.max_combinations]
-
-        # Step 7 - expected rate fetch
-        try:
-            testrows = populate_expected_rates(testrows, self.sf)
-            missing = sum(1 for r in testrows if r.expected_tax_rate is None)
-            self._log(logging.INFO, "Expected rates fetched", run_id=run_id, step="fetch_rates", missing_rates=missing)
-        except Exception as e:
-            self._log(logging.ERROR, f"Fetching expected rates failed: {e}", run_id=run_id, step="fetch_rates")
-            raise
-
-        # Step 8 - generate BCI file
-        try:
-            csv_bytes = generate_bci_from_template(template_path, testrows)
-            file_name = f"vttfg_{jira_id}.csv"
-            saved = filestore.save_bytes(file_name, csv_bytes)
-            self._log(logging.INFO, "Generated BCI file saved", run_id=run_id, step="save", file_path=saved)
-        except Exception as e:
-            self._log(logging.ERROR, f"BCI generation failed: {e}", run_id=run_id, step="generate")
-            raise
-
-        # Step 9 - audit
-        duration = time.time() - start_t
-        result = {'file_path': saved, 'rows_count': len(testrows), 'metadata': {'run_id': run_id, 'classification': classification, 'duration_seconds': duration}}
-        self._log(logging.INFO, f"Completed run in {duration:.1f}s", run_id=run_id, step="complete", rows=len(testrows), file_path=saved)
-        return result
-
-
-
-def load_classify_prompt():
-    """
-    Load classification prompt from prompts/classify.json relative to the project base.
-    Works regardless of current working directory.
-    """
-    # Get absolute path to the project root (vttfg_project)
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    prompt_path = os.path.join(base_dir, "prompts", "classify.json")
-
-    if not os.path.exists(prompt_path):
-        raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
-
-    with open(prompt_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    return data.get("classification", {}).get("prompt")
+        # 2) Build text blob (title + description + comments + linked docs text if any)
+        pieces = []
+        if getattr(jc, "title", None):
+            pieces.append(f"Title: {jc.title}")
+        if getattr(jc, "description", None):
+            pieces.append("Description:\n" + (jc.description if isinstance(jc.description, str) else str(jc.description)))
+        if getattr(jc, "comments", None):
+            comments_text = "\n\n".join([str(c) for c in (jc.comments or [])])
+            if comments_text:
+                pieces.append("Comments:\n" + comments_text)
+        # linked docs fetch
+        linked_docs = getattr(jc, "linked_docs", []) or []
+        for url in linked_docs:
+            try:
+                txt = self.gdocs.fetch_doc_text(url)
+                pieces.append("Linked doc content:\n" + txt[:2000])
+            except Exception as e:
+                logger.warning("Failed fetching linked doc %s: %s", url, e)
+                pieces.append(f"Linked doc (url included): {url}")
+        text_blob = overrides.get("text_blob") or "\n\n".join(pieces)
+        # 3) Classification (LLM) once unless override
+        classification = overrides.get("classification")
+        if not classification:
+            classify_prompt = load_classify_prompt()
+            classification, conf = self.llm.classify(jc.title, prompt=classify_prompt)
+        # 4) Extraction (LLM) unless manual override
+        extraction = overrides.get("manual_extraction")
+        if not extraction:
+            prompt = load_prompt_for("uc3")
+            extraction = self.llm.extract(text_blob, classification, prompt=prompt)
+        # Ensure jira_created_at present if dates missing
+        if "date_specs" not in extraction or not extraction.get("date_specs"):
+            extraction["jira_created_at"] = jc.created_at.strftime("%Y-%m-%d") if jc and getattr(jc, "created_at", None) else ""
+        # 5) Validate and collect questions
+        qs = validate_uc3(extraction)
+        if qs:
+            debug["clarify_questions"] = qs
+        # 6) Build test rows
+        test_rows = build_testrows(extraction, template_path=overrides.get("template_path"))
+        # 7) Optional expected rate fetch via Snowflake
+        if self.snow:
+            try:
+                queries = []
+                for r in test_rows:
+                    queries.append((r.product_code, r.dest_main_division, r.dest_postal_code, r.document_date))
+                rates = self.snow.batch_get_expected_rates(queries)
+                for r in test_rows:
+                    key = (r.product_code, r.dest_main_division, r.dest_postal_code, r.document_date)
+                    if key in rates:
+                        r.expected_value = rates[key]
+            except Exception as e:
+                logger.warning("Failed to fetch rates: %s", e)
+        # 8) Generate CSV bytes and save
+        csv_bytes = rows_to_csv_bytes(test_rows)
+        os.makedirs(CONFIG.output_dir, exist_ok=True)
+        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        fname = f"vttfg_bci_{jira_id.replace('/','_')}_{ts}.csv"
+        out_path = os.path.join(CONFIG.output_dir, fname)
+        with open(out_path, "wb") as fh:
+            fh.write(csv_bytes)
+        audit = {"jira_id": jira_id, "extraction": extraction, "debug": debug}
+        audit_path = os.path.join(CONFIG.output_dir, f"audit_{jira_id}_{ts}.json")
+        with open(audit_path, "w", encoding="utf-8") as fh:
+            json.dump(audit, fh, default=str, indent=2)
+        return {"rows_count": len(test_rows), "file_path": out_path, "audit_path": audit_path, "debug": debug}
